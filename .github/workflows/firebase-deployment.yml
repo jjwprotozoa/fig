@@ -75,4 +75,199 @@ jobs:
             echo "environment=staging" >> $GITHUB_OUTPUT
             echo "project-id=${{ secrets.FIREBASE_STAGING_PROJECT_ID }}" >> $GITHUB_OUTPUT
           fi
+
+      - name: Determine components to deploy
+        id: check-components
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ github.event.inputs.components }}" == "all" ]]; then
+              echo "deploy-functions=true" >> $GITHUB_OUTPUT
+              echo "deploy-firestore=true" >> $GITHUB_OUTPUT
+              echo "deploy-storage=true" >> $GITHUB_OUTPUT
+              echo "deploy-hosting=true" >> $GITHUB_OUTPUT
+            else
+              echo "deploy-functions=${{ github.event.inputs.components == 'functions' }}" >> $GITHUB_OUTPUT
+              echo "deploy-firestore=${{ github.event.inputs.components == 'firestore' }}" >> $GITHUB_OUTPUT
+              echo "deploy-storage=${{ github.event.inputs.components == 'storage' }}" >> $GITHUB_OUTPUT
+              echo "deploy-hosting=${{ github.event.inputs.components == 'hosting' }}" >> $GITHUB_OUTPUT
+            fi
+          else
+            # Check for changes in paths to determine what to deploy
+            git diff --name-only ${{ github.event.before }} ${{ github.sha }} > changed_files.txt
+            
+            if grep -q "firebase/functions" changed_files.txt; then
+              echo "deploy-functions=true" >> $GITHUB_OUTPUT
+            else
+              echo "deploy-functions=false" >> $GITHUB_OUTPUT
+            fi
+            
+            if grep -q "firestore.rules" changed_files.txt; then
+              echo "deploy-firestore=true" >> $GITHUB_OUTPUT
+            else
+              echo "deploy-firestore=false" >> $GITHUB_OUTPUT
+            fi
+            
+            if grep -q "storage.rules" changed_files.txt; then
+              echo "deploy-storage=true" >> $GITHUB_OUTPUT
+            else
+              echo "deploy-storage=false" >> $GITHUB_OUTPUT
+            fi
+            
+            # For hosting, we'll deploy if there are changes to the build artifacts
+            echo "deploy-hosting=true" >> $GITHUB_OUTPUT
+          fi
+
+  validate-rules:
+    name: Validate Firebase Rules
+    needs: setup
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.deploy-firestore == 'true' || needs.setup.outputs.deploy-storage == 'true'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Install Firebase Tools
+        run: npm install -g firebase-tools
+
+      - name: Validate Firestore Rules
+        if: needs.setup.outputs.deploy-firestore == 'true'
+        run: firebase firestore:rules:lint firestore.rules
+
+      - name: Validate Storage Rules
+        if: needs.setup.outputs.deploy-storage == 'true'
+        run: firebase storage:rules:lint storage.rules
+
+  deploy-functions:
+    name: Deploy Cloud Functions
+    needs: [setup, validate-rules]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.deploy-functions == 'true'
+    environment: ${{ needs.setup.outputs.environment }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'firebase/functions/package-lock.json'
+
+      - name: Install dependencies
+        run: cd firebase/functions && npm ci
+
+      - name: Run ESLint on functions
+        run: cd firebase/functions && npm run lint
+
+      - name: Run tests for functions
+        run: cd firebase/functions && npm test
+        
+      - name: Set environment variables for Functions
+        run: |
+          cd firebase/functions
+          
+          # Create .env file with appropriate environment variables
+          cat > .env << EOL
+          NODE_ENV=${{ needs.setup.outputs.environment }}
+          PROJECT_ID=${{ needs.setup.outputs.project-id }}
+          AI_API_KEY=${{ secrets.AI_API_KEY }}
+          AI_ENDPOINT=${{ secrets.AI_ENDPOINT }}
+          EOL
+
+      - name: Deploy Functions
+        uses: w9jds/firebase-action@v12.4.0
+        with:
+          args: deploy --only functions --project ${{ needs.setup.outputs.project-id }}
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+          PROJECT_PATH: ./
+
+  deploy-firestore:
+    name: Deploy Firestore Rules
+    needs: [setup, validate-rules]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.deploy-firestore == 'true'
+    environment: ${{ needs.setup.outputs.environment }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Deploy Firestore Rules
+        uses: w9jds/firebase-action@v12.4.0
+        with:
+          args: deploy --only firestore:rules --project ${{ needs.setup.outputs.project-id }}
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+          PROJECT_PATH: ./
+
+  deploy-storage:
+    name: Deploy Storage Rules
+    needs: [setup, validate-rules]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.deploy-storage == 'true'
+    environment: ${{ needs.setup.outputs.environment }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Deploy Storage Rules
+        uses: w9jds/firebase-action@v12.4.0
+        with:
+          args: deploy --only storage:rules --project ${{ needs.setup.outputs.project-id }}
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+          PROJECT_PATH: ./
+
+  deploy-hosting:
+    name: Deploy to Firebase Hosting
+    needs: [setup]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.deploy-hosting == 'true'
+    environment: ${{ needs.setup.outputs.environment }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+        env:
+          VITE_FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ needs.setup.outputs.project-id }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          VITE_FIREBASE_MEASUREMENT_ID: ${{ secrets.FIREBASE_MEASUREMENT_ID }}
+          VITE_API_URL: ${{ secrets.API_URL }}
+          VITE_AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          VITE_AI_ENDPOINT: ${{ secrets.AI_ENDPOINT }}
+          VITE_ENVIRONMENT: ${{ needs.setup.outputs.environment }}
+
+      - name: Deploy to Firebase Hosting
+        uses: w9jds/firebase-action@v12.4.0
+        with:
+          args: deploy --only hosting --project ${{ needs.setup.outputs.project-id }}
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+          PROJECT_PATH: ./
 '@
