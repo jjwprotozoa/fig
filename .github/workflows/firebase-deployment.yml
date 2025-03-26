@@ -1,0 +1,78 @@
+Set-Content -Path .github\workflows\firebase-deployment.yml -Value @'
+name: FIG Firebase Deployment
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'firebase/**'
+      - 'firestore.rules'
+      - 'storage.rules'
+      - 'firebase.json'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'firebase/**'
+      - 'firestore.rules'
+      - 'storage.rules'
+      - 'firebase.json'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - production
+      components:
+        description: 'Components to deploy'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+        - all
+        - functions
+        - firestore
+        - storage
+        - hosting
+
+jobs:
+  setup:
+    name: Setup and Validation
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.determine-env.outputs.environment }}
+      project-id: ${{ steps.determine-env.outputs.project-id }}
+      deploy-functions: ${{ steps.check-components.outputs.deploy-functions }}
+      deploy-firestore: ${{ steps.check-components.outputs.deploy-firestore }}
+      deploy-storage: ${{ steps.check-components.outputs.deploy-storage }}
+      deploy-hosting: ${{ steps.check-components.outputs.deploy-hosting }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Determine environment
+        id: determine-env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+            if [[ "${{ github.event.inputs.environment }}" == "production" ]]; then
+              echo "project-id=${{ secrets.FIREBASE_PROD_PROJECT_ID }}" >> $GITHUB_OUTPUT
+            else
+              echo "project-id=${{ secrets.FIREBASE_STAGING_PROJECT_ID }}" >> $GITHUB_OUTPUT
+            fi
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "project-id=${{ secrets.FIREBASE_PROD_PROJECT_ID }}" >> $GITHUB_OUTPUT
+          else
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "project-id=${{ secrets.FIREBASE_STAGING_PROJECT_ID }}" >> $GITHUB_OUTPUT
+          fi
+'@
